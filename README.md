@@ -1,5 +1,5 @@
 Code for the dissertation:
-"Changing NDVI–Climate Relationships in the Glacier Forelands of the Juneau Icefield (1984–2025)"
+"When Warming Stops Greening: Changing NDVI–Climate Relationships in the Glacier Forelands of the Juneau Icefield (1984–2025)"
 
 Author: 2492506 (GEES University of Birmingham)
 
