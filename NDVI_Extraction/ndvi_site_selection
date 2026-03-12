@@ -1,0 +1,73 @@
+/**** =========================================================
+ Juneau site selection for Landsat / NDVI analysis
+ Google Earth Engine JavaScript code
+
+ Purpose:
+ This script creates random sampling sites for the Juneau study region
+ based on glacier polygons from GLIMS. A buffered region of interest
+ is built from the glacier extent, and random points are generated
+ within that buffered area.
+
+ Run this script in the Google Earth Engine Code Editor:
+ https://code.earthengine.google.com/
+
+ User input needed:
+ - Replace the GLIMS asset path below with your own glacier polygon asset.
+========================================================= ****/
+
+
+/**** ==================== 0) USER INPUT ==================== ****/
+// Replace this with your own GLIMS glacier polygon asset
+var glims = ee.FeatureCollection('users/your_username/glims_polygons');
+
+// Define the Juneau study bounding box
+var juneau_bbox = ee.Geometry.Rectangle([-135.25, 58.2, -133.5, 59.57]);
+
+
+/**** ==================== 1) FILTER GLIMS TO JUNEau ==================== ****/
+var juneau_glims = glims.filterBounds(juneau_bbox);
+
+print('Juneau GLIMS count:', juneau_glims.size());
+
+
+/**** ==================== 2) BUILD BUFFERED ROI ==================== ****/
+// Use the bounding rectangle of glacier extent
+var juneau_bounds = juneau_glims.geometry().bounds();
+
+// Buffer distance in meters
+var bufferDist = 1000 * 1000; // 1000 km
+
+// Buffered region of interest
+var roi_buffer = juneau_bounds.buffer(bufferDist);
+
+Map.centerObject(juneau_bbox, 7);
+Map.addLayer(juneau_glims, {color: 'cyan'}, 'Juneau GLIMS');
+Map.addLayer(juneau_bounds, {color: 'blue'}, 'Juneau bounds', false);
+Map.addLayer(roi_buffer, {color: 'yellow'}, 'Buffered ROI', true);
+
+
+/**** ==================== 3) RANDOM SITE GENERATION ==================== ****/
+var nPoints = 1000;
+
+var sites = ee.FeatureCollection.randomPoints({
+  region: roi_buffer,
+  points: nPoints,
+  seed: 42,
+  maxError: 1
+}).map(function(f) {
+  return f.set({
+    'CID': 1,
+    'ORIG_FID': f.id()
+  });
+});
+
+Map.addLayer(sites, {}, 'Random sites');
+
+
+/**** ==================== 4) EXPORT ASSET ==================== ****/
+// Replace the assetId below with your own output path if needed
+Export.table.toAsset({
+  collection: sites,
+  description: 'juneau_sites_pts_buf1000km',
+  assetId: 'users/ee-huang31415926/juneau_sites_pts_buf1000km'
+});
