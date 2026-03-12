@@ -1,0 +1,232 @@
+/**** =========================================================
+ Juneau Icefield foreland climate extraction from ERA5-Land
+ Google Earth Engine JavaScript code
+
+ Purpose:
+ This script extracts annual summer (JJA) climate variables
+ from ERA5-Land over the non-glaciated area surrounding the
+ Juneau Icefield for 1984–2025.
+
+ Run this script in the Google Earth Engine Code Editor:
+ https://code.earthengine.google.com/
+
+ User input needed:
+ - Replace the GLIMS asset path below with your own glacier polygon asset.
+========================================================= ****/
+
+
+/**** ==================== 0) USER INPUT ==================== ****/
+// Replace this with your own GLIMS glacier polygon asset
+var glims = ee.FeatureCollection('users/your_username/glims_polygons');
+
+
+/**** ==================== 1) STUDY AREA ==================== ****/
+// Juneau regional bounding box
+var juneau_bbox = ee.Geometry.Rectangle([-135.25, 58.2, -133.5, 59.57]);
+
+Map.centerObject(juneau_bbox, 8);
+Map.addLayer(juneau_bbox, {color: 'red'}, 'Juneau bbox', false);
+
+
+/**** ==================== 2) GLACIER / NON-ICE MASK ==================== ****/
+// Filter GLIMS polygons to the Juneau region
+var juneau_glims = glims.filterBounds(juneau_bbox);
+print('Juneau GLIMS count (raw):', juneau_glims.size());
+
+// Simplify glacier polygons to reduce geometry complexity
+var simpTol = 2000; // meters
+
+var juneau_glims_s = juneau_glims.map(function(f) {
+  return ee.Feature(f).simplify(simpTol);
+});
+
+Map.addLayer(juneau_glims_s, {color: 'cyan'}, 'GLIMS simplified', false);
+
+// Merge all glacier polygons into one icefield geometry
+var icefield = juneau_glims_s.union(simpTol).geometry();
+
+// Define non-ice area inside the Juneau bounding box
+var nonIce = juneau_bbox.difference(icefield, simpTol);
+
+Map.addLayer(nonIce, {color: 'yellow'}, 'Non-ice region', false);
+
+
+/**** ==================== 3) ERA5-LAND DATA ==================== ****/
+// Load ERA5-Land monthly aggregated data
+var era5 = ee.ImageCollection('ECMWF/ERA5_LAND/MONTHLY_AGGR')
+  .filterBounds(juneau_bbox)
+  .filterDate('1984-01-01', '2025-12-31');
+
+print('ERA5-Land first image bands:', era5.first().bandNames());
+
+// Keep June–August only
+var jja = era5.filter(ee.Filter.calendarRange(6, 8, 'month'));
+
+// Year list
+var years = ee.List.sequence(1984, 2025);
+
+
+/**** ==================== 4) VARIABLE GROUPS ==================== ****/
+// Variables to average over JJA
+var meanVars_temp = [
+  'soil_temperature_level_1',
+  'soil_temperature_level_2',
+  'soil_temperature_level_3',
+  'soil_temperature_level_4'
+];
+
+var meanVars_moist = [
+  'volumetric_soil_water_layer_1',
+  'volumetric_soil_water_layer_2',
+  'volumetric_soil_water_layer_3',
+  'volumetric_soil_water_layer_4'
+];
+
+var meanVars_t2m = [
+  'temperature_2m'
+];
+
+var meanVars_snowDepth = [
+  'snow_depth'
+];
+
+// Variables to sum over JJA
+var sumVars_snowFlux = [
+  'snowfall_sum',
+  'snowmelt_sum'
+];
+
+
+/**** ==================== 5) BUILD ANNUAL JJA COLLECTIONS ==================== ****/
+// Build an annual JJA image collection using either mean or sum
+function buildAnnualCollection(monthlyJJA, yearsList, reducerType) {
+  return ee.ImageCollection(
+    yearsList.map(function(y) {
+      y = ee.Number(y);
+      var yr = monthlyJJA.filter(ee.Filter.calendarRange(y, y, 'year'));
+
+      var img = ee.Image(
+        ee.Algorithms.If(
+          yr.size().gt(0),
+          ee.Algorithms.If(
+            ee.String(reducerType).compareTo('mean').eq(0),
+            yr.mean(),
+            yr.sum()
+          ),
+          null
+        )
+      );
+
+      return img.set('year', y);
+    })
+  ).filter(ee.Filter.notNull(['year']));
+}
+
+// Annual JJA means
+var annualJJA_mean = buildAnnualCollection(jja, years, 'mean');
+
+// Annual JJA sums
+var annualJJA_sum = buildAnnualCollection(jja, years, 'sum');
+
+print('annualJJA_mean size:', annualJJA_mean.size());
+print('annualJJA_sum size:', annualJJA_sum.size());
+
+
+/**** ==================== 6) REGION MEAN EXTRACTION ==================== ****/
+// Extract regional mean values for selected variables
+function extractMean(img, varList, regionGeom, scaleVal) {
+  var stats = img.select(varList).reduceRegion({
+    reducer: ee.Reducer.mean(),
+    geometry: regionGeom,
+    scale: scaleVal,
+    bestEffort: true,
+    maxPixels: 1e13
+  });
+
+  return ee.Feature(null, stats).set('year', img.get('year'));
+}
+
+
+/**** ==================== 7) BUILD TIME-SERIES TABLES ==================== ****/
+// ERA5-Land native resolution is about 9 km
+var outScale = 10000; // meters
+
+// Soil temperature: JJA mean
+var ts_temp = annualJJA_mean.map(function(img) {
+  return extractMean(img, meanVars_temp, nonIce, outScale);
+});
+
+// Soil moisture: JJA mean
+var ts_moist = annualJJA_mean.map(function(img) {
+  return extractMean(img, meanVars_moist, nonIce, outScale);
+});
+
+// 2 m air temperature: JJA mean
+var ts_t2m = annualJJA_mean.map(function(img) {
+  return extractMean(img, meanVars_t2m, nonIce, outScale);
+});
+
+// Snow depth: JJA mean
+var ts_snowDepth = annualJJA_mean.map(function(img) {
+  return extractMean(img, meanVars_snowDepth, nonIce, outScale);
+});
+
+// Snowfall and snowmelt: JJA total
+var ts_snowFlux = annualJJA_sum.map(function(img) {
+  return extractMean(img, sumVars_snowFlux, nonIce, outScale);
+});
+
+
+/**** ==================== 8) QUICK CHECKS ==================== ****/
+print('First soil temperature row:', ts_temp.first());
+print('First soil moisture row:', ts_moist.first());
+print('First air temperature row:', ts_t2m.first());
+print('First snow depth row:', ts_snowDepth.first());
+print('First snow flux row:', ts_snowFlux.first());
+
+
+/**** ==================== 9) EXPORT CSV FILES ==================== ****/
+Export.table.toDrive({
+  collection: ts_temp,
+  description: 'Juneau_nonIce_JJA_1984_2025_soilTemp_L1toL4_mean',
+  fileFormat: 'CSV'
+});
+
+Export.table.toDrive({
+  collection: ts_moist,
+  description: 'Juneau_nonIce_JJA_1984_2025_soilMoist_L1toL4_mean',
+  fileFormat: 'CSV'
+});
+
+Export.table.toDrive({
+  collection: ts_t2m,
+  description: 'Juneau_nonIce_JJA_1984_2025_t2m_mean',
+  fileFormat: 'CSV'
+});
+
+Export.table.toDrive({
+  collection: ts_snowDepth,
+  description: 'Juneau_nonIce_JJA_1984_2025_snowDepth_mean',
+  fileFormat: 'CSV'
+});
+
+Export.table.toDrive({
+  collection: ts_snowFlux,
+  description: 'Juneau_nonIce_JJA_1984_2025_snowfallSum_snowmeltSum_total',
+  fileFormat: 'CSV'
+});
+
+
+/**** ==================== 10) OPTIONAL MAP PREVIEW ==================== ****/
+// Preview one variable for one year
+var previewYear = 2020;
+var previewImg = ee.Image(
+  annualJJA_mean.filter(ee.Filter.eq('year', previewYear)).first()
+);
+
+Map.addLayer(
+  previewImg.select('temperature_2m'),
+  {min: 270, max: 295},
+  'JJA mean 2m air temperature ' + previewYear,
+  false
+);
